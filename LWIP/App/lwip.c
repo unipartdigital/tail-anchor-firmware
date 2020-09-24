@@ -25,6 +25,7 @@
 #include "lwip/sio.h"
 #endif /* MDK ARM Compiler */
 #include "ethernetif.h"
+#include "mqtt_manager.h"
 #include <string.h>
 
 /* USER CODE BEGIN 0 */
@@ -88,6 +89,7 @@ void MX_LWIP_Init(void)
 
   /* Set the link callback function, this function is called on change of link status*/
   netif_set_link_callback(&gnetif, ethernetif_update_config);
+  netif_set_status_callback(&gnetif, network_status_changed);
 
   /* create a binary semaphore used for informing ethernetif of frame reception */
   Netif_LinkSemaphore = osSemaphoreNew(1, 1, NULL);

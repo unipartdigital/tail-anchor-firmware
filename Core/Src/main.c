@@ -22,6 +22,12 @@
 #include "cmsis_os.h"
 #include "lwip.h"
 #include "usb_device.h"
+#include "mqtt_manager.h"
+#include "messages.h"
+#include "radio.h"
+#include "radio_spi.h"
+
+#include <stdbool.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -54,9 +60,17 @@ osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
   .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 128 * 4
+  .stack_size = 128 * 4 * 2
 };
 /* USER CODE BEGIN PV */
+
+/* Definitions for ledTask */
+osThreadId_t ledTaskHandle;
+const osThreadAttr_t ledTask_attributes = {
+  .name = "ledTask",
+  .priority = (osPriority_t) osPriorityNormal,
+  .stack_size = 128 * 4
+};
 
 /* USER CODE END PV */
 
@@ -67,8 +81,17 @@ static void MX_SPI2_Init(void);
 static void MX_SPI4_Init(void);
 static void MX_USART1_UART_Init(void);
 void StartDefaultTask(void *argument);
+void StartLEDTask(void *argument);
 
 /* USER CODE BEGIN PFP */
+
+#ifdef __GNUC__
+/* With GCC, small printf (option LD Linker->Libraries->Small printf
+   set to 'Yes') calls __io_putchar() */
+#define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
+#else
+#define PUTCHAR_PROTOTYPE int fputc(int ch, FILE *f)
+#endif /* __GNUC__ */
 
 /* USER CODE END PFP */
 
@@ -110,6 +133,21 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
+  setvbuf(stdout, NULL, _IONBF, 0);
+
+  printf("Hello\r\n");
+  printf("There\r\n");
+
+  /* Reset PHY */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_RESET);
+  HAL_Delay(100);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_SET);
+  HAL_Delay(1);
+
+  radio_spi_init(&hspi4);
+  radio_init(true);
+  radio_leds(true, 1);
+
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -134,11 +172,22 @@ int main(void)
   /* Create the thread(s) */
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+  ledTaskHandle = osThreadNew(StartLEDTask, NULL, &ledTask_attributes);
+  messages_init();
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
 
+  /* PD0 PD1 PD2 PD4 */
+
+#if 0
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_4, GPIO_PIN_SET);
+#endif
+ 
   /* Start scheduler */
   osKernelStart();
 
@@ -270,11 +319,12 @@ static void MX_SPI4_Init(void)
   hspi4.Instance = SPI4;
   hspi4.Init.Mode = SPI_MODE_MASTER;
   hspi4.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi4.Init.DataSize = SPI_DATASIZE_4BIT;
+  hspi4.Init.DataSize = SPI_DATASIZE_8BIT;
   hspi4.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi4.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi4.Init.NSS = SPI_NSS_HARD_OUTPUT;
-  hspi4.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  //hspi4.Init.NSS = SPI_NSS_HARD_OUTPUT;
+  hspi4.Init.NSS = SPI_NSS_SOFT;
+  hspi4.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
   hspi4.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi4.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi4.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -286,6 +336,17 @@ static void MX_SPI4_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN SPI4_Init 2 */
+
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_4, GPIO_PIN_SET);
+
+  /*Configure GPIO pins : PE4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /* USER CODE END SPI4_Init 2 */
 
@@ -377,6 +438,9 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
+  /* Make sure the heater stays on when we configure the GPIO */
+  set_heater(true);
+
   /*Configure GPIO pins : PC7 PC9 */
   GPIO_InitStruct.Pin = GPIO_PIN_7|GPIO_PIN_9;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -401,6 +465,43 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+static void led_update(void)
+{
+  static int state = 0;
+  int led0, led1, led2, led3;
+  led0 = led1 = led2 = led3 = 0;
+  switch (state) {
+  case 0:
+    led0 = 1;
+    break;
+  case 1:
+    led1 = 1;
+    break;
+  case 2:
+    led2 = 1;
+    break;
+  case 3:
+    led3 = 1;
+    break;
+  }
+  state = (state+1) % 4;
+
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, led0?GPIO_PIN_SET:GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1, led1?GPIO_PIN_SET:GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2, led2?GPIO_PIN_SET:GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_4, led3?GPIO_PIN_SET:GPIO_PIN_RESET);
+}
+
+bool get_heater(void)
+{
+  return HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_9);
+}
+
+void set_heater(bool on)
+{
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_9, on?GPIO_PIN_SET:GPIO_PIN_RESET);
+}
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -418,12 +519,23 @@ void StartDefaultTask(void *argument)
   /* init code for USB_DEVICE */
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 5 */
+
   /* Infinite loop */
+
   for(;;)
   {
     osDelay(1);
   }
   /* USER CODE END 5 */
+}
+
+void StartLEDTask(void *argument)
+{
+  for(;;)
+  {
+    led_update();
+    osDelay(1);
+  }
 }
 
 /**
@@ -475,5 +587,34 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+
+/**
+  * @brief  Retargets the C library printf function to the USART.
+  * @param  None
+  * @retval None
+  */
+PUTCHAR_PROTOTYPE
+{
+  /* Place your implementation of fputc here */
+  /* e.g. write a character to the USART3 and Loop until the end of transmission */
+  HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, 0xFFFF);
+
+  return ch;
+}
+
+int _write(int file, char *data, int len)
+{
+    HAL_UART_Transmit(&huart1, (uint8_t *)data, len, 0xFFFF);
+    return len;
+}
+
+
+void vApplicationStackOverflowHook( TaskHandle_t xTask,
+                                    signed char *pcTaskName )
+{
+    printf("Stack overflow\n");
+    printf("  Task is %s\n", pcTaskName);
+}
 
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
